@@ -3,9 +3,13 @@ import os
 # HF_HOME must be set before any HuggingFace/transformers imports
 os.environ["HF_HOME"] = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
 
+import json
 import tempfile
 import time
+from pathlib import Path
+
 import numpy as np
+import soundfile as sf
 import torch
 import gradio as gr
 from qwen_tts import Qwen3TTSModel
@@ -26,8 +30,51 @@ LANGUAGES = [
     "French", "Russian", "Portuguese", "Spanish", "Italian", "Auto",
 ]
 
+VOICES_DIR = Path(__file__).parent / "voices"
+OUTPUTS_DIR = Path(__file__).parent / "outputs"
+OUTPUTS_DIR.mkdir(exist_ok=True)
+
 _models: dict = {}
 
+
+# ---------------------------------------------------------------------------
+# Registered voice helpers
+# ---------------------------------------------------------------------------
+
+def _list_voices() -> list[str]:
+    VOICES_DIR.mkdir(exist_ok=True)
+    return sorted(d.name for d in VOICES_DIR.iterdir() if d.is_dir())
+
+
+def save_voice(name: str, ref_audio, ref_text: str, language: str):
+    name = name.strip()
+    if not name:
+        raise gr.Error("登録名を入力してください。")
+    if ref_audio is None:
+        raise gr.Error("参照音声をアップロードしてください。")
+    voice_dir = VOICES_DIR / name
+    voice_dir.mkdir(parents=True, exist_ok=True)
+    ref_sr, ref_data = ref_audio
+    sf.write(str(voice_dir / "ref.wav"), ref_data, ref_sr)
+    (voice_dir / "info.json").write_text(
+        json.dumps({"transcript": ref_text, "language": language}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return gr.Dropdown(choices=_list_voices(), value=name)
+
+
+def load_voice(name: str):
+    if not name:
+        raise gr.Error("声を選択してください。")
+    voice_dir = VOICES_DIR / name
+    data, sr = sf.read(str(voice_dir / "ref.wav"), always_2d=False)
+    info = json.loads((voice_dir / "info.json").read_text(encoding="utf-8"))
+    return (sr, data), info["transcript"], info.get("language", "Auto")
+
+
+# ---------------------------------------------------------------------------
+# MP3 export
+# ---------------------------------------------------------------------------
 
 def _to_mp3(data: np.ndarray, sr: int) -> str:
     import lameenc
@@ -46,11 +93,15 @@ def _to_mp3(data: np.ndarray, sr: int) -> str:
     encoder.set_channels(1)
     encoder.set_quality(2)  # 2 = highest quality
     mp3_bytes = encoder.encode(data.tobytes()) + encoder.flush()
-    tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
+    tmp = tempfile.NamedTemporaryFile(suffix=".mp3", dir=OUTPUTS_DIR, delete=False)
     tmp.write(mp3_bytes)
     tmp.close()
     return tmp.name
 
+
+# ---------------------------------------------------------------------------
+# Model
+# ---------------------------------------------------------------------------
 
 def get_model(key: str) -> Qwen3TTSModel:
     if key not in _models:
@@ -67,6 +118,10 @@ def get_model(key: str) -> Qwen3TTSModel:
         print(f"[voice-echo] Loaded: {model_id}")
     return _models[key]
 
+
+# ---------------------------------------------------------------------------
+# Generation
+# ---------------------------------------------------------------------------
 
 def generate_custom(text: str, language: str, speaker: str, instruct: str):
     if not text.strip():
@@ -124,6 +179,10 @@ def generate_clone(text: str, language: str, ref_audio, ref_text: str):
     elapsed = time.perf_counter() - t0
     return _to_mp3(wavs[0], sr), f"{elapsed:.1f} 秒"
 
+
+# ---------------------------------------------------------------------------
+# UI
+# ---------------------------------------------------------------------------
 
 with gr.Blocks(title="Qwen3-TTS Demo") as demo:
     gr.Markdown("# Qwen3-TTS Demo")
@@ -204,6 +263,19 @@ with gr.Blocks(title="Qwen3-TTS Demo") as demo:
             )
             with gr.Row():
                 with gr.Column():
+
+                    # -- Registered voice loader --
+                    with gr.Group():
+                        gr.Markdown("#### 登録済みの声")
+                        with gr.Row():
+                            vc_voice_dd = gr.Dropdown(
+                                choices=_list_voices(),
+                                label="声を選択",
+                                scale=3,
+                            )
+                            vc_load_btn = gr.Button("読み込む", scale=1)
+
+                    # -- Inputs --
                     vc_text = gr.Textbox(
                         label="読み上げるテキスト",
                         lines=4,
@@ -223,6 +295,18 @@ with gr.Blocks(title="Qwen3-TTS Demo") as demo:
                         placeholder="参照音声で話されている内容を正確に入力...",
                     )
                     vc_btn = gr.Button("生成", variant="primary")
+
+                    # -- Voice registration --
+                    with gr.Group():
+                        gr.Markdown("#### この参照音声を登録")
+                        with gr.Row():
+                            vc_voice_name = gr.Textbox(
+                                label="登録名",
+                                placeholder="例: MyVoice",
+                                scale=3,
+                            )
+                            vc_save_btn = gr.Button("登録", scale=1)
+
                 with gr.Column():
                     vc_audio = gr.Audio(label="出力音声")
                     vc_time = gr.Textbox(label="生成時間", interactive=False)
@@ -232,6 +316,17 @@ with gr.Blocks(title="Qwen3-TTS Demo") as demo:
                 inputs=[vc_text, vc_language, vc_ref_audio, vc_ref_text],
                 outputs=[vc_audio, vc_time],
             )
+            vc_load_btn.click(
+                fn=load_voice,
+                inputs=vc_voice_dd,
+                outputs=[vc_ref_audio, vc_ref_text, vc_language],
+            )
+            vc_save_btn.click(
+                fn=save_voice,
+                inputs=[vc_voice_name, vc_ref_audio, vc_ref_text, vc_language],
+                outputs=vc_voice_dd,
+            )
 
 if __name__ == "__main__":
-    demo.launch(server_name="0.0.0.0", server_port=7860, share=False)
+    demo.launch(server_name="0.0.0.0", server_port=7860, share=False,
+                allowed_paths=[str(OUTPUTS_DIR)])
