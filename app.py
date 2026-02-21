@@ -329,6 +329,19 @@ with gr.Blocks(title="Qwen3-TTS Demo") as demo:
             )
 
 if __name__ == "__main__":
-    demo.launch(server_name="0.0.0.0", server_port=7860, share=False,
+    import socket
+
+    env_port = os.environ.get("APP_PORT", "")
+    if env_port.isdigit():
+        port = int(env_port)
+    else:
+        port = 7860
+        while True:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                if s.connect_ex(("127.0.0.1", port)) != 0:
+                    break
+            port += 1
+
+    demo.launch(server_name="0.0.0.0", server_port=port, share=False,
                 allowed_paths=[str(OUTPUTS_DIR)])
 

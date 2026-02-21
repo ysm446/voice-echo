@@ -39,8 +39,21 @@ if errorlevel 1 (
 echo [OK] conda env "main" activated
 echo.
 
-:: Open browser after 5 seconds
-start /b cmd /c "timeout /t 5 /nobreak > nul && start http://localhost:7860"
+:: Find first available port starting from 7860
+setlocal enabledelayedexpansion
+set APP_PORT=
+for /L %%P in (7860,1,7960) do (
+    if not defined APP_PORT (
+        powershell -NoProfile -Command "try{$c=New-Object Net.Sockets.TcpClient;$c.Connect('127.0.0.1',%%P);$c.Close();exit 0}catch{exit 1}" >nul 2>&1
+        if errorlevel 1 set APP_PORT=%%P
+    )
+)
+if not defined APP_PORT set APP_PORT=7860
+echo [OK] Using port !APP_PORT!
+echo.
+
+:: Open browser after 5 seconds on the detected port
+start /b cmd /c "timeout /t 5 /nobreak > nul && start http://localhost:!APP_PORT!"
 
 python app.py
 
