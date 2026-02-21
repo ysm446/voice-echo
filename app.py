@@ -3,6 +3,8 @@ import os
 # HF_HOME must be set before any HuggingFace/transformers imports
 os.environ["HF_HOME"] = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
 
+import time
+import numpy as np
 import torch
 import gradio as gr
 from qwen_tts import Qwen3TTSModel
@@ -46,13 +48,15 @@ def generate_custom(text: str, language: str, speaker: str, instruct: str):
     if not text.strip():
         raise gr.Error("テキストを入力してください。")
     model = get_model("custom_voice")
+    t0 = time.perf_counter()
     wavs, sr = model.generate_custom_voice(
         text=text,
         language=language,
         speaker=speaker,
         instruct=instruct,
     )
-    return (sr, wavs[0])
+    elapsed = time.perf_counter() - t0
+    return (sr, wavs[0]), f"{elapsed:.1f} 秒"
 
 
 def generate_design(text: str, language: str, instruct: str):
@@ -61,12 +65,14 @@ def generate_design(text: str, language: str, instruct: str):
     if not instruct.strip():
         raise gr.Error("音声の説明を入力してください。")
     model = get_model("voice_design")
+    t0 = time.perf_counter()
     wavs, sr = model.generate_voice_design(
         text=text,
         language=language,
         instruct=instruct,
     )
-    return (sr, wavs[0])
+    elapsed = time.perf_counter() - t0
+    return (sr, wavs[0]), f"{elapsed:.1f} 秒"
 
 
 def generate_clone(text: str, language: str, ref_audio, ref_text: str):
@@ -79,13 +85,20 @@ def generate_clone(text: str, language: str, ref_audio, ref_text: str):
     model = get_model("voice_clone")
     # Gradio delivers (sample_rate, numpy_array); qwen_tts expects (numpy_array, sample_rate)
     ref_sr, ref_data = ref_audio
+    # Normalize to float32 [-1, 1]; Gradio may return raw PCM values (e.g. int16 range as float)
+    ref_data = ref_data.astype(np.float32)
+    max_val = np.abs(ref_data).max()
+    if max_val > 1.0:
+        ref_data = ref_data / max_val
+    t0 = time.perf_counter()
     wavs, sr = model.generate_voice_clone(
         text=text,
         language=language,
         ref_audio=(ref_data, ref_sr),
         ref_text=ref_text,
     )
-    return (sr, wavs[0])
+    elapsed = time.perf_counter() - t0
+    return (sr, wavs[0]), f"{elapsed:.1f} 秒"
 
 
 with gr.Blocks(title="Qwen3-TTS Demo") as demo:
@@ -122,11 +135,12 @@ with gr.Blocks(title="Qwen3-TTS Demo") as demo:
                     cv_btn = gr.Button("生成", variant="primary")
                 with gr.Column():
                     cv_audio = gr.Audio(label="出力音声", type="numpy")
+                    cv_time = gr.Textbox(label="生成時間", interactive=False)
 
             cv_btn.click(
                 fn=generate_custom,
                 inputs=[cv_text, cv_language, cv_speaker, cv_instruct],
-                outputs=cv_audio,
+                outputs=[cv_audio, cv_time],
             )
 
         # --- Tab 2: Voice Design ---
@@ -150,11 +164,12 @@ with gr.Blocks(title="Qwen3-TTS Demo") as demo:
                     vd_btn = gr.Button("生成", variant="primary")
                 with gr.Column():
                     vd_audio = gr.Audio(label="出力音声", type="numpy")
+                    vd_time = gr.Textbox(label="生成時間", interactive=False)
 
             vd_btn.click(
                 fn=generate_design,
                 inputs=[vd_text, vd_language, vd_instruct],
-                outputs=vd_audio,
+                outputs=[vd_audio, vd_time],
             )
 
         # --- Tab 3: Voice Clone ---
@@ -186,11 +201,12 @@ with gr.Blocks(title="Qwen3-TTS Demo") as demo:
                     vc_btn = gr.Button("生成", variant="primary")
                 with gr.Column():
                     vc_audio = gr.Audio(label="出力音声", type="numpy")
+                    vc_time = gr.Textbox(label="生成時間", interactive=False)
 
             vc_btn.click(
                 fn=generate_clone,
                 inputs=[vc_text, vc_language, vc_ref_audio, vc_ref_text],
-                outputs=vc_audio,
+                outputs=[vc_audio, vc_time],
             )
 
 if __name__ == "__main__":
