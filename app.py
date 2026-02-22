@@ -17,10 +17,17 @@ from qwen_tts import Qwen3TTSModel
 DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
 DTYPE = torch.bfloat16 if torch.cuda.is_available() else torch.float32
 
-MODEL_IDS = {
-    "custom_voice": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
-    "voice_design": "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
-    "voice_clone": "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+MODEL_VARIANTS = {
+    "1.7B": {
+        "custom_voice": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+        "voice_design": "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
+        "voice_clone": "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+    },
+    "0.6B": {
+        "custom_voice": "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
+        "voice_design": "Qwen/Qwen3-TTS-12Hz-0.6B-VoiceDesign",
+        "voice_clone": "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+    },
 }
 
 SPEAKERS = ["Vivian", "Serena", "Uncle_Fu", "Dylan", "Eric", "Ryan", "Aiden", "Ono_Anna", "Sohee"]
@@ -32,6 +39,7 @@ LANGUAGES = [
 
 VOICES_DIR = Path(__file__).parent / "voices"
 OUTPUTS_DIR = Path(__file__).parent / "outputs"
+SETTINGS_PATH = Path(__file__).parent / "settings.json"
 OUTPUTS_DIR.mkdir(exist_ok=True)
 
 _models: dict = {}
@@ -40,6 +48,33 @@ _models: dict = {}
 # ---------------------------------------------------------------------------
 # Registered voice helpers
 # ---------------------------------------------------------------------------
+
+def _load_model_size_setting() -> str:
+    default_size = "1.7B"
+    try:
+        if not SETTINGS_PATH.exists():
+            return default_size
+        data = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+        size = data.get("model_size")
+        return size if size in MODEL_VARIANTS else default_size
+    except Exception:
+        return default_size
+
+
+def _save_model_size_setting(size: str):
+    if size not in MODEL_VARIANTS:
+        return
+    SETTINGS_PATH.write_text(
+        json.dumps({"model_size": size}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def update_model_size(size: str) -> str:
+    size = size if size in MODEL_VARIANTS else "1.7B"
+    _save_model_size_setting(size)
+    return render_model_info(size)
+
 
 def _list_voices() -> list[str]:
     VOICES_DIR.mkdir(exist_ok=True)
@@ -103,9 +138,11 @@ def _to_mp3(data: np.ndarray, sr: int) -> str:
 # Model
 # ---------------------------------------------------------------------------
 
-def get_model(key: str) -> Qwen3TTSModel:
-    if key not in _models:
-        model_id = MODEL_IDS[key]
+def get_model(mode: str, size: str) -> Qwen3TTSModel:
+    size = size if size in MODEL_VARIANTS else "1.7B"
+    model_id = MODEL_VARIANTS[size][mode]
+    cache_key = f"{size}:{mode}"
+    if cache_key not in _models:
         print(f"[voice-echo] Loading {model_id} ...")
         load_kwargs: dict = {"device_map": DEVICE, "dtype": DTYPE}
         try:
@@ -114,19 +151,29 @@ def get_model(key: str) -> Qwen3TTSModel:
             print("[voice-echo] flash_attention_2 enabled")
         except ImportError:
             pass
-        _models[key] = Qwen3TTSModel.from_pretrained(model_id, **load_kwargs)
+        _models[cache_key] = Qwen3TTSModel.from_pretrained(model_id, **load_kwargs)
         print(f"[voice-echo] Loaded: {model_id}")
-    return _models[key]
+    return _models[cache_key]
+
+
+def render_model_info(size: str) -> str:
+    size = size if size in MODEL_VARIANTS else "1.7B"
+    ids = MODEL_VARIANTS[size]
+    return (
+        f"- Custom Voice: `{ids['custom_voice']}`\n"
+        f"- Voice Design: `{ids['voice_design']}`\n"
+        f"- Voice Clone: `{ids['voice_clone']}`"
+    )
 
 
 # ---------------------------------------------------------------------------
 # Generation
 # ---------------------------------------------------------------------------
 
-def generate_custom(text: str, language: str, speaker: str, instruct: str):
+def generate_custom(text: str, language: str, speaker: str, instruct: str, model_size: str):
     if not text.strip():
         raise gr.Error("テキストを入力してください。")
-    model = get_model("custom_voice")
+    model = get_model("custom_voice", model_size)
     t0 = time.perf_counter()
     wavs, sr = model.generate_custom_voice(
         text=text,
@@ -138,12 +185,12 @@ def generate_custom(text: str, language: str, speaker: str, instruct: str):
     return _to_mp3(wavs[0], sr), f"{elapsed:.1f} 秒"
 
 
-def generate_design(text: str, language: str, instruct: str):
+def generate_design(text: str, language: str, instruct: str, model_size: str):
     if not text.strip():
         raise gr.Error("テキストを入力してください。")
     if not instruct.strip():
         raise gr.Error("音声の説明を入力してください。")
-    model = get_model("voice_design")
+    model = get_model("voice_design", model_size)
     t0 = time.perf_counter()
     wavs, sr = model.generate_voice_design(
         text=text,
@@ -154,14 +201,14 @@ def generate_design(text: str, language: str, instruct: str):
     return _to_mp3(wavs[0], sr), f"{elapsed:.1f} 秒"
 
 
-def generate_clone(text: str, language: str, ref_audio, ref_text: str):
+def generate_clone(text: str, language: str, ref_audio, ref_text: str, model_size: str):
     if not text.strip():
         raise gr.Error("テキストを入力してください。")
     if ref_audio is None:
         raise gr.Error("参照音声をアップロードしてください。")
     if not ref_text.strip():
         raise gr.Error("参照音声のトランスクリプトを入力してください。")
-    model = get_model("voice_clone")
+    model = get_model("voice_clone", model_size)
     # Gradio delivers (sample_rate, numpy_array); qwen_tts expects (numpy_array, sample_rate)
     ref_sr, ref_data = ref_audio
     # Normalize to float32 [-1, 1]; Gradio may return raw PCM values (e.g. int16 range as float)
@@ -185,6 +232,7 @@ def generate_clone(text: str, language: str, ref_audio, ref_text: str):
 # ---------------------------------------------------------------------------
 
 with gr.Blocks(title="Qwen3-TTS Demo") as demo:
+    default_model_size = _load_model_size_setting()
     gr.Markdown("# Qwen3-TTS Demo")
     gr.Markdown(
         "3つのモード: "
@@ -194,7 +242,6 @@ with gr.Blocks(title="Qwen3-TTS Demo") as demo:
     )
 
     with gr.Tabs():
-
         # --- Tab 1: Custom Voice ---
         with gr.Tab("Custom Voice"):
             gr.Markdown("プリセット話者を選び、スタイル指示を与えて音声を生成します。")
@@ -220,12 +267,6 @@ with gr.Blocks(title="Qwen3-TTS Demo") as demo:
                     cv_audio = gr.Audio(label="出力音声")
                     cv_time = gr.Textbox(label="生成時間", interactive=False)
 
-            cv_btn.click(
-                fn=generate_custom,
-                inputs=[cv_text, cv_language, cv_speaker, cv_instruct],
-                outputs=[cv_audio, cv_time],
-            )
-
         # --- Tab 2: Voice Design ---
         with gr.Tab("Voice Design"):
             gr.Markdown("自然言語で声の特徴を記述して音声を生成します。")
@@ -248,12 +289,6 @@ with gr.Blocks(title="Qwen3-TTS Demo") as demo:
                 with gr.Column():
                     vd_audio = gr.Audio(label="出力音声")
                     vd_time = gr.Textbox(label="生成時間", interactive=False)
-
-            vd_btn.click(
-                fn=generate_design,
-                inputs=[vd_text, vd_language, vd_instruct],
-                outputs=[vd_audio, vd_time],
-            )
 
         # --- Tab 3: Voice Clone ---
         with gr.Tab("Voice Clone"):
@@ -312,21 +347,41 @@ with gr.Blocks(title="Qwen3-TTS Demo") as demo:
                     vc_audio = gr.Audio(label="出力音声")
                     vc_time = gr.Textbox(label="生成時間", interactive=False)
 
-            vc_btn.click(
-                fn=generate_clone,
-                inputs=[vc_text, vc_language, vc_ref_audio, vc_ref_text],
-                outputs=[vc_audio, vc_time],
+        with gr.Tab("Model管理"):
+            gr.Markdown("生成に使うモデルサイズを選択します。")
+            model_size = gr.Dropdown(
+                choices=list(MODEL_VARIANTS.keys()),
+                value=default_model_size,
+                label="モデルサイズ",
             )
-            vc_load_btn.click(
-                fn=load_voice,
-                inputs=vc_voice_dd,
-                outputs=[vc_ref_audio, vc_ref_text, vc_language],
-            )
-            vc_save_btn.click(
-                fn=save_voice,
-                inputs=[vc_voice_name, vc_ref_audio, vc_ref_text, vc_language],
-                outputs=vc_voice_dd,
-            )
+            model_info = gr.Markdown(render_model_info(default_model_size))
+            model_size.change(fn=update_model_size, inputs=model_size, outputs=model_info)
+
+    cv_btn.click(
+        fn=generate_custom,
+        inputs=[cv_text, cv_language, cv_speaker, cv_instruct, model_size],
+        outputs=[cv_audio, cv_time],
+    )
+    vd_btn.click(
+        fn=generate_design,
+        inputs=[vd_text, vd_language, vd_instruct, model_size],
+        outputs=[vd_audio, vd_time],
+    )
+    vc_btn.click(
+        fn=generate_clone,
+        inputs=[vc_text, vc_language, vc_ref_audio, vc_ref_text, model_size],
+        outputs=[vc_audio, vc_time],
+    )
+    vc_load_btn.click(
+        fn=load_voice,
+        inputs=vc_voice_dd,
+        outputs=[vc_ref_audio, vc_ref_text, vc_language],
+    )
+    vc_save_btn.click(
+        fn=save_voice,
+        inputs=[vc_voice_name, vc_ref_audio, vc_ref_text, vc_language],
+        outputs=vc_voice_dd,
+    )
 
 if __name__ == "__main__":
     import socket
@@ -344,4 +399,3 @@ if __name__ == "__main__":
 
     demo.launch(server_name="0.0.0.0", server_port=port, share=False,
                 allowed_paths=[str(OUTPUTS_DIR)])
-
