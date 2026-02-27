@@ -30,6 +30,42 @@ MODEL_VARIANTS = {
     },
 }
 
+ASR_MODELS = {
+    "1.7B": "Qwen/Qwen3-ASR-1.7B",
+    "0.6B": "Qwen/Qwen3-ASR-0.6B",
+}
+
+TRANSLATE_MODELS = {
+    "1.7B": "Qwen/Qwen3-1.7B",
+    "0.6B": "Qwen/Qwen3-0.6B",
+}
+
+TRANSLATE_STYLE_PRESETS = {
+    "標準": "",
+    "フォーマル": "Use formal, professional language.",
+    "カジュアル": "Use casual, conversational language.",
+    "丁寧・敬語": "Use polite and respectful language.",
+    "シンプル": "Use simple, easy-to-understand language.",
+    "怒り": "Translate with angry, frustrated tone. Use strong, assertive words.",
+    "喜び": "Translate with joyful, enthusiastic tone. Use upbeat, energetic language.",
+    "悲しみ": "Translate with sad, melancholic tone.",
+    "武士": "Translate in the style of a noble samurai warrior.",
+}
+
+# Map ASR-detected language names to TTS language names
+ASR_LANGUAGE_MAP = {
+    "Chinese": "Chinese",
+    "English": "English",
+    "Japanese": "Japanese",
+    "Korean": "Korean",
+    "German": "German",
+    "French": "French",
+    "Russian": "Russian",
+    "Portuguese": "Portuguese",
+    "Spanish": "Spanish",
+    "Italian": "Italian",
+}
+
 SPEAKERS = ["Vivian", "Serena", "Uncle_Fu", "Dylan", "Eric", "Ryan", "Aiden", "Ono_Anna", "Sohee"]
 
 LANGUAGES = [
@@ -49,31 +85,74 @@ _models: dict = {}
 # Registered voice helpers
 # ---------------------------------------------------------------------------
 
-def _load_model_size_setting() -> str:
-    default_size = "1.7B"
+def _load_settings() -> dict:
     try:
-        if not SETTINGS_PATH.exists():
-            return default_size
-        data = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
-        size = data.get("model_size")
-        return size if size in MODEL_VARIANTS else default_size
+        if SETTINGS_PATH.exists():
+            return json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
     except Exception:
-        return default_size
+        pass
+    return {}
+
+
+def _save_settings(data: dict):
+    existing = _load_settings()
+    existing.update(data)
+    SETTINGS_PATH.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _load_model_size_setting() -> str:
+    size = _load_settings().get("model_size", "1.7B")
+    return size if size in MODEL_VARIANTS else "1.7B"
 
 
 def _save_model_size_setting(size: str):
     if size not in MODEL_VARIANTS:
         return
-    SETTINGS_PATH.write_text(
-        json.dumps({"model_size": size}, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    _save_settings({"model_size": size})
+
+
+def _load_asr_model_size_setting() -> str:
+    size = _load_settings().get("asr_model_size", "0.6B")
+    return size if size in ASR_MODELS else "0.6B"
+
+
+def _save_asr_model_size_setting(size: str):
+    if size not in ASR_MODELS:
+        return
+    _save_settings({"asr_model_size": size})
+
+
+def _load_translate_model_size_setting() -> str:
+    size = _load_settings().get("translate_model_size", "0.6B")
+    return size if size in TRANSLATE_MODELS else "0.6B"
+
+
+def _save_translate_model_size_setting(size: str):
+    if size not in TRANSLATE_MODELS:
+        return
+    _save_settings({"translate_model_size": size})
 
 
 def update_model_size(size: str) -> str:
     size = size if size in MODEL_VARIANTS else "1.7B"
     _save_model_size_setting(size)
     return render_model_info(size)
+
+
+def update_asr_model_size(size: str) -> str:
+    size = size if size in ASR_MODELS else "0.6B"
+    _save_asr_model_size_setting(size)
+    return f"`{ASR_MODELS[size]}`"
+
+
+def update_translate_model_size(size: str) -> str:
+    size = size if size in TRANSLATE_MODELS else "0.6B"
+    _save_translate_model_size_setting(size)
+    return f"`{TRANSLATE_MODELS[size]}`"
+
+
+def fill_style_preset(preset: str) -> str:
+    return TRANSLATE_STYLE_PRESETS.get(preset, "")
 
 
 def _list_voices() -> list[str]:
@@ -96,6 +175,17 @@ def save_voice(name: str, ref_audio, ref_text: str, language: str):
         encoding="utf-8",
     )
     return gr.Dropdown(choices=_list_voices(), value=name)
+
+
+def delete_voice(name: str):
+    if not name:
+        raise gr.Error("削除する声を選択してください。")
+    import shutil
+    voice_dir = VOICES_DIR / name
+    if voice_dir.exists():
+        shutil.rmtree(str(voice_dir))
+    voices = _list_voices()
+    return gr.Dropdown(choices=voices, value=voices[0] if voices else None)
 
 
 def load_voice(name: str):
@@ -137,6 +227,22 @@ def _to_mp3(data: np.ndarray, sr: int) -> str:
 # ---------------------------------------------------------------------------
 # Model
 # ---------------------------------------------------------------------------
+
+def get_asr_model(size: str):
+    size = size if size in ASR_MODELS else "0.6B"
+    cache_key = f"asr:{size}"
+    if cache_key not in _models:
+        from qwen_asr import Qwen3ASRModel
+        model_id = ASR_MODELS[size]
+        print(f"[voice-echo] Loading {model_id} ...")
+        _models[cache_key] = Qwen3ASRModel.from_pretrained(
+            model_id,
+            dtype=DTYPE,
+            device_map=DEVICE,
+        )
+        print(f"[voice-echo] Loaded: {model_id}")
+    return _models[cache_key]
+
 
 def get_model(mode: str, size: str) -> Qwen3TTSModel:
     size = size if size in MODEL_VARIANTS else "1.7B"
@@ -227,12 +333,83 @@ def generate_clone(text: str, language: str, ref_audio, ref_text: str, model_siz
     return _to_mp3(wavs[0], sr), f"{elapsed:.1f} 秒"
 
 
+def transcribe_ref(ref_audio, asr_size: str):
+    if ref_audio is None:
+        raise gr.Error("参照音声をアップロードしてください。")
+    model = get_asr_model(asr_size)
+    ref_sr, ref_data = ref_audio
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+        tmp_path = f.name
+    try:
+        sf.write(tmp_path, ref_data, ref_sr)
+        results = model.transcribe(audio=tmp_path, language=None)
+    finally:
+        os.unlink(tmp_path)
+    result = results[0]
+    text = result.text
+    detected = getattr(result, "language", None) or ""
+    language = ASR_LANGUAGE_MAP.get(detected, "Auto")
+    return text, language
+
+
+def get_translate_model(size: str):
+    size = size if size in TRANSLATE_MODELS else "0.6B"
+    cache_key = f"translate:{size}"
+    if cache_key not in _models:
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+        model_id = TRANSLATE_MODELS[size]
+        print(f"[voice-echo] Loading {model_id} ...")
+        tokenizer = AutoTokenizer.from_pretrained(model_id)
+        model = AutoModelForCausalLM.from_pretrained(
+            model_id,
+            torch_dtype=DTYPE,
+            device_map=DEVICE,
+        )
+        _models[cache_key] = (model, tokenizer)
+        print(f"[voice-echo] Loaded: {model_id}")
+    return _models[cache_key]
+
+
+def translate_text(text: str, target_lang: str, translate_size: str, style_instruct: str = ""):
+    if not text.strip():
+        raise gr.Error("翻訳するテキストがありません。参照音声のトランスクリプトを入力してください。")
+    model, tokenizer = get_translate_model(translate_size)
+    style_part = f" {style_instruct.strip()}" if style_instruct.strip() else ""
+    prompt = (
+        f"Translate the following text to {target_lang} in natural spoken language suitable for text-to-speech.{style_part} "
+        "Output only the translated text, nothing else.\n\n"
+        f"{text}"
+    )
+    messages = [{"role": "user", "content": prompt}]
+    input_text = tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+        enable_thinking=False,
+    )
+    inputs = tokenizer([input_text], return_tensors="pt").to(model.device)
+    with torch.no_grad():
+        generated_ids = model.generate(
+            **inputs,
+            max_new_tokens=1024,
+            temperature=0.7,
+            top_p=0.8,
+            top_k=20,
+            do_sample=True,
+        )
+    output_ids = generated_ids[0][len(inputs.input_ids[0]):]
+    translated = tokenizer.decode(output_ids, skip_special_tokens=True).strip()
+    return translated, target_lang
+
+
 # ---------------------------------------------------------------------------
 # UI
 # ---------------------------------------------------------------------------
 
 with gr.Blocks(title="Qwen3-TTS Demo") as demo:
     default_model_size = _load_model_size_setting()
+    default_asr_model_size = _load_asr_model_size_setting()
+    default_translate_model_size = _load_translate_model_size_setting()
     gr.Markdown("# Qwen3-TTS Demo")
     gr.Markdown(
         "3つのモード: "
@@ -298,6 +475,19 @@ with gr.Blocks(title="Qwen3-TTS Demo") as demo:
             )
             with gr.Row():
                 with gr.Column():
+                    # -- Inputs --
+                    vc_ref_audio = gr.Audio(
+                        label="参照音声",
+                        type="numpy",
+                        sources=["upload", "microphone"],
+                    )
+                    vc_transcribe_btn = gr.Button("📝 自動文字起こし (ASR)")
+                    vc_ref_text = gr.Textbox(
+                        label="参照音声のトランスクリプト",
+                        lines=2,
+                        placeholder="参照音声で話されている内容を正確に入力...",
+                    )
+
                     # -- Speaker management --
                     with gr.Accordion("話者", open=False):
                         # -- Registered voice loader --
@@ -310,6 +500,7 @@ with gr.Blocks(title="Qwen3-TTS Demo") as demo:
                                     scale=3,
                                 )
                                 vc_load_btn = gr.Button("読み込み", scale=1)
+                                vc_delete_btn = gr.Button("🗑️ 削除", scale=1, variant="stop")
 
                         # -- Voice registration --
                         with gr.Group():
@@ -322,40 +513,63 @@ with gr.Blocks(title="Qwen3-TTS Demo") as demo:
                                 )
                                 vc_save_btn = gr.Button("登録", scale=1)
 
-                    # -- Inputs --
+                with gr.Column():
+                    vc_audio = gr.Audio(label="出力音声")
+                    vc_time = gr.Textbox(label="生成時間", interactive=False)
+                    with gr.Row():
+                        vc_translate_lang = gr.Dropdown(
+                            choices=[l for l in LANGUAGES if l != "Auto"],
+                            value="English",
+                            label="翻訳先言語",
+                            scale=2,
+                        )
+                        vc_style_preset = gr.Dropdown(
+                            choices=list(TRANSLATE_STYLE_PRESETS.keys()),
+                            value="標準",
+                            label="スタイル",
+                            scale=2,
+                        )
+                    vc_style_instruct = gr.Textbox(
+                        label="スタイル指示（任意・自由入力可）",
+                        placeholder='例: "Speak like a pirate" / "子供向けに易しく"',
+                    )
+                    vc_translate_btn = gr.Button("🌐 翻訳")
+                    vc_language = gr.Dropdown(
+                        choices=LANGUAGES, value="English", label="言語"
+                    )
                     vc_text = gr.Textbox(
                         label="読み上げるテキスト",
                         lines=4,
                         placeholder="クローンした声で読み上げるテキストを入力...",
                     )
-                    vc_language = gr.Dropdown(
-                        choices=LANGUAGES, value="English", label="言語"
-                    )
-                    vc_ref_audio = gr.Audio(
-                        label="参照音声",
-                        type="numpy",
-                        sources=["upload", "microphone"],
-                    )
-                    vc_ref_text = gr.Textbox(
-                        label="参照音声のトランスクリプト",
-                        lines=2,
-                        placeholder="参照音声で話されている内容を正確に入力...",
-                    )
                     vc_btn = gr.Button("生成", variant="primary")
-
-                with gr.Column():
-                    vc_audio = gr.Audio(label="出力音声")
-                    vc_time = gr.Textbox(label="生成時間", interactive=False)
 
         with gr.Tab("Model管理"):
             gr.Markdown("生成に使うモデルサイズを選択します。")
+            gr.Markdown("### TTS モデル")
             model_size = gr.Dropdown(
                 choices=list(MODEL_VARIANTS.keys()),
                 value=default_model_size,
-                label="モデルサイズ",
+                label="TTS モデルサイズ",
             )
             model_info = gr.Markdown(render_model_info(default_model_size))
             model_size.change(fn=update_model_size, inputs=model_size, outputs=model_info)
+            gr.Markdown("### ASR モデル（自動文字起こし）")
+            asr_model_size = gr.Dropdown(
+                choices=list(ASR_MODELS.keys()),
+                value=default_asr_model_size,
+                label="ASR モデルサイズ",
+            )
+            asr_model_info = gr.Markdown(f"`{ASR_MODELS[default_asr_model_size]}`")
+            asr_model_size.change(fn=update_asr_model_size, inputs=asr_model_size, outputs=asr_model_info)
+            gr.Markdown("### 翻訳モデル（Qwen3）")
+            translate_model_size = gr.Dropdown(
+                choices=list(TRANSLATE_MODELS.keys()),
+                value=default_translate_model_size,
+                label="翻訳モデルサイズ",
+            )
+            translate_model_info = gr.Markdown(f"`{TRANSLATE_MODELS[default_translate_model_size]}`")
+            translate_model_size.change(fn=update_translate_model_size, inputs=translate_model_size, outputs=translate_model_info)
 
     cv_btn.click(
         fn=generate_custom,
@@ -372,10 +586,30 @@ with gr.Blocks(title="Qwen3-TTS Demo") as demo:
         inputs=[vc_text, vc_language, vc_ref_audio, vc_ref_text, model_size],
         outputs=[vc_audio, vc_time],
     )
+    vc_transcribe_btn.click(
+        fn=transcribe_ref,
+        inputs=[vc_ref_audio, asr_model_size],
+        outputs=[vc_ref_text, vc_language],
+    )
+    vc_style_preset.change(
+        fn=fill_style_preset,
+        inputs=vc_style_preset,
+        outputs=vc_style_instruct,
+    )
+    vc_translate_btn.click(
+        fn=translate_text,
+        inputs=[vc_ref_text, vc_translate_lang, translate_model_size, vc_style_instruct],
+        outputs=[vc_text, vc_language],
+    )
     vc_load_btn.click(
         fn=load_voice,
         inputs=vc_voice_dd,
         outputs=[vc_ref_audio, vc_ref_text, vc_language],
+    )
+    vc_delete_btn.click(
+        fn=delete_voice,
+        inputs=vc_voice_dd,
+        outputs=vc_voice_dd,
     )
     vc_save_btn.click(
         fn=save_voice,

@@ -1,5 +1,6 @@
 gradio>=5.0.0
 qwen-tts
+qwen-asr
 torch
 soundfile
 numpy
